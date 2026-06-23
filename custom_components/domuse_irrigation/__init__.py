@@ -29,7 +29,6 @@ _WS_REGISTERED = False
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register WebSocket commands once at component load time."""
     global _WS_REGISTERED
     if not _WS_REGISTERED:
         _register_ws_commands(hass)
@@ -38,14 +37,12 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up a config entry."""
     store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     data = await store.async_load() or {"pumps": [], "schedules": []}
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {"store": store, "data": data, "timers": {}}
 
-    # Serve panel + card JS from the integration www/ folder
     www_path = os.path.join(os.path.dirname(__file__), "www")
     await hass.http.async_register_static_paths(
         [StaticPathConfig(STATIC_PATH, www_path, cache_headers=False)]
@@ -73,17 +70,20 @@ async def _async_reload_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def _register_panel(hass: HomeAssistant) -> None:
     from homeassistant.components import panel_custom
-    await panel_custom.async_register_panel(
-        hass,
-        webcomponent_name="domuse-irrigation-panel",
-        frontend_url_path="domuse-irrigation",
-        module_url=PANEL_URL,
-        sidebar_title="Irrigation",
-        sidebar_icon="mdi:water-pump",
-        config={},
-        require_admin=False,
-        trust_external=False,
-    )
+    try:
+        await panel_custom.async_register_panel(
+            hass,
+            webcomponent_name="domuse-irrigation-panel",
+            frontend_url_path="domuse-irrigation",
+            module_url=PANEL_URL,
+            sidebar_title="Irrigation",
+            sidebar_icon="mdi:water-pump",
+            config={},
+            require_admin=False,
+            trust_external=False,
+        )
+    except ValueError:
+        pass  # already registered from a previous setup/reload
 
 
 async def _register_card_resource(hass: HomeAssistant) -> None:
@@ -151,7 +151,8 @@ def _register_ws_commands(hass: HomeAssistant) -> None:
 async def ws_get_config(hass, connection, msg):
     eid = _get_entry_id(hass)
     if not eid:
-        connection.send_error(msg["id"], "not_found", "Integration not configured"); return
+        connection.send_error(msg["id"], "not_found", "Integration not configured")
+        return
     connection.send_result(msg["id"], hass.data[DOMAIN][eid]["data"])
 
 
@@ -164,7 +165,8 @@ async def ws_get_config(hass, connection, msg):
 async def ws_add_pump(hass, connection, msg):
     eid = _get_entry_id(hass)
     if not eid:
-        connection.send_error(msg["id"], "not_found", "Integration not configured"); return
+        connection.send_error(msg["id"], "not_found", "Integration not configured")
+        return
     dd = hass.data[DOMAIN][eid]
     pump = {"id": str(uuid.uuid4()), "name": msg["name"], "entity_id": msg["entity_id"]}
     dd["data"]["pumps"].append(pump)
@@ -180,7 +182,8 @@ async def ws_add_pump(hass, connection, msg):
 async def ws_remove_pump(hass, connection, msg):
     eid = _get_entry_id(hass)
     if not eid:
-        connection.send_error(msg["id"], "not_found", "Integration not configured"); return
+        connection.send_error(msg["id"], "not_found", "Integration not configured")
+        return
     dd = hass.data[DOMAIN][eid]
     dd["data"]["pumps"] = [p for p in dd["data"]["pumps"] if p["id"] != msg["pump_id"]]
     await dd["store"].async_save(dd["data"])
@@ -199,7 +202,8 @@ async def ws_remove_pump(hass, connection, msg):
 async def ws_add_schedule(hass, connection, msg):
     eid = _get_entry_id(hass)
     if not eid:
-        connection.send_error(msg["id"], "not_found", "Integration not configured"); return
+        connection.send_error(msg["id"], "not_found", "Integration not configured")
+        return
     dd = hass.data[DOMAIN][eid]
     schedule = {
         "id": str(uuid.uuid4()),
@@ -223,7 +227,8 @@ async def ws_add_schedule(hass, connection, msg):
 async def ws_remove_schedule(hass, connection, msg):
     eid = _get_entry_id(hass)
     if not eid:
-        connection.send_error(msg["id"], "not_found", "Integration not configured"); return
+        connection.send_error(msg["id"], "not_found", "Integration not configured")
+        return
     dd = hass.data[DOMAIN][eid]
     dd["data"]["schedules"] = [s for s in dd["data"]["schedules"] if s["id"] != msg["schedule_id"]]
     await dd["store"].async_save(dd["data"])
