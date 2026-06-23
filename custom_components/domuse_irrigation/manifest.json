@@ -1,1 +1,11 @@
-{"domain":"domuse_irrigation","name":"Domuse Irrigation","version":"1.0.0","config_flow":true,"dependencies":["frontend","http","panel_custom"],"codeowners":[],"requirements":[],"iot_class":"local_push","documentation":"https://github.com/Chris-Kegel/domuse-irrigation"}
+{
+  "domain": "domuse_irrigation",
+  "name": "Domuse Irrigation",
+  "version": "1.0.0",
+  "config_flow": true,
+  "dependencies": ["frontend", "http", "panel_custom"],
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "local_push",
+  "documentation": "https://github.com/Chris-Kegel/domuse-irrigation"
+}
