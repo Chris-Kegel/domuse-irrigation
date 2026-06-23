@@ -85,7 +85,7 @@ async def _register_panel(hass: HomeAssistant) -> None:
             trust_external=False,
         )
     except ValueError:
-        pass  # already registered on reload
+        pass
 
 
 def _schedule_card_resource(hass: HomeAssistant) -> None:
@@ -93,29 +93,22 @@ def _schedule_card_resource(hass: HomeAssistant) -> None:
         try:
             from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
             lovelace = hass.data.get(LOVELACE_DOMAIN)
-            _LOGGER.debug("domuse_irrigation: lovelace keys=%s", list(lovelace.keys()) if lovelace else None)
-
-            resources = (lovelace or {}).get("resources")
-            _LOGGER.debug("domuse_irrigation: resources object=%s", type(resources).__name__ if resources else None)
-
+            # LovelaceData is a dataclass — use getattr, not .get()
+            resources = getattr(lovelace, "resources", None)
             if resources is None:
-                _LOGGER.warning("domuse_irrigation: Lovelace resources not available, showing notification")
+                _LOGGER.warning("domuse_irrigation: Lovelace resources not available")
                 _show_manual_resource_notification(hass)
                 return
 
-            # Try to load storage data
             try:
                 await resources.async_load()
             except Exception:
                 pass
 
-            # Iterate items — try async_items(), fall back to data.values()
             try:
                 items = resources.async_items()
             except AttributeError:
                 items = list(getattr(resources, "data", {}).values())
-
-            _LOGGER.debug("domuse_irrigation: existing resources=%s", [i.get("url") for i in items])
 
             for item in items:
                 if item.get("url") == CARD_URL:
