@@ -8,6 +8,7 @@ import uuid
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_change
@@ -46,7 +47,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Serve panel + card JS from the integration www/ folder
     www_path = os.path.join(os.path.dirname(__file__), "www")
-    hass.http.register_static_path(STATIC_PATH, www_path, cache_headers=False)
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(STATIC_PATH, www_path, cache_headers=False)]
+    )
 
     if entry.options.get(CONF_SHOW_IN_SIDEBAR, True):
         await _register_panel(hass)
