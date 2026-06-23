@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.persistent_notification import async_create as pn_create
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
@@ -88,39 +89,66 @@ async def _register_panel(hass: HomeAssistant) -> None:
 
 
 def _schedule_card_resource(hass: HomeAssistant) -> None:
-    """Register the card JS in Lovelace resources after HA has fully started."""
-
     async def _do_register(_event=None) -> None:
         try:
             from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
             lovelace = hass.data.get(LOVELACE_DOMAIN)
-            if not lovelace:
-                _LOGGER.warning(
-                    "Lovelace not initialised — add %s as a Lovelace resource manually.", CARD_URL
-                )
-                return
-            resources = lovelace.get("resources")
+            _LOGGER.debug("domuse_irrigation: lovelace keys=%s", list(lovelace.keys()) if lovelace else None)
+
+            resources = (lovelace or {}).get("resources")
+            _LOGGER.debug("domuse_irrigation: resources object=%s", type(resources).__name__ if resources else None)
+
             if resources is None:
-                _LOGGER.warning(
-                    "Lovelace resource storage unavailable — add %s manually.", CARD_URL
-                )
+                _LOGGER.warning("domuse_irrigation: Lovelace resources not available, showing notification")
+                _show_manual_resource_notification(hass)
                 return
-            await resources.async_get_info()
-            for item in resources.async_items():
+
+            # Try to load storage data
+            try:
+                await resources.async_load()
+            except Exception:
+                pass
+
+            # Iterate items — try async_items(), fall back to data.values()
+            try:
+                items = resources.async_items()
+            except AttributeError:
+                items = list(getattr(resources, "data", {}).values())
+
+            _LOGGER.debug("domuse_irrigation: existing resources=%s", [i.get("url") for i in items])
+
+            for item in items:
                 if item.get("url") == CARD_URL:
-                    _LOGGER.debug("Card resource already registered.")
+                    _LOGGER.debug("domuse_irrigation: card resource already registered")
                     return
+
             await resources.async_create_item({"res_type": "module", "url": CARD_URL})
-            _LOGGER.info("Auto-registered Lovelace card resource: %s", CARD_URL)
+            _LOGGER.info("domuse_irrigation: registered Lovelace card resource %s", CARD_URL)
+
         except Exception as err:
-            _LOGGER.warning(
-                "Could not auto-register card resource (%s) — add %s manually.", err, CARD_URL
-            )
+            _LOGGER.warning("domuse_irrigation: card resource registration failed (%s)", err)
+            _show_manual_resource_notification(hass)
 
     if hass.is_running:
         hass.async_create_task(_do_register())
     else:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_register)
+
+
+def _show_manual_resource_notification(hass: HomeAssistant) -> None:
+    pn_create(
+        hass,
+        (
+            "The Irrigation card could not be auto-registered as a Lovelace resource.\n\n"
+            "Add it manually:\n"
+            "**Settings → Dashboards → ⋮ (top right) → Resources → Add Resource**\n\n"
+            f"URL: `{CARD_URL}`\n"
+            "Type: **JavaScript module**\n\n"
+            "Then hard-refresh your browser (Ctrl+Shift+R)."
+        ),
+        title="Domuse Irrigation — Action needed",
+        notification_id=f"{DOMAIN}_card_resource",
+    )
 
 
 async def _setup_schedules(hass: HomeAssistant, entry_id: str) -> None:
