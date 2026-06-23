@@ -93,31 +93,24 @@ def _schedule_card_resource(hass: HomeAssistant) -> None:
         try:
             from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
             lovelace = hass.data.get(LOVELACE_DOMAIN)
-            # LovelaceData is a dataclass — use getattr, not .get()
             resources = getattr(lovelace, "resources", None)
             if resources is None:
                 _LOGGER.warning("domuse_irrigation: Lovelace resources not available")
                 _show_manual_resource_notification(hass)
                 return
-
             try:
                 await resources.async_load()
             except Exception:
                 pass
-
             try:
                 items = resources.async_items()
             except AttributeError:
                 items = list(getattr(resources, "data", {}).values())
-
             for item in items:
                 if item.get("url") == CARD_URL:
-                    _LOGGER.debug("domuse_irrigation: card resource already registered")
                     return
-
             await resources.async_create_item({"res_type": "module", "url": CARD_URL})
             _LOGGER.info("domuse_irrigation: registered Lovelace card resource %s", CARD_URL)
-
         except Exception as err:
             _LOGGER.warning("domuse_irrigation: card resource registration failed (%s)", err)
             _show_manual_resource_notification(hass)
@@ -134,14 +127,20 @@ def _show_manual_resource_notification(hass: HomeAssistant) -> None:
         (
             "The Irrigation card could not be auto-registered as a Lovelace resource.\n\n"
             "Add it manually:\n"
-            "**Settings → Dashboards → ⋮ (top right) → Resources → Add Resource**\n\n"
-            f"URL: `{CARD_URL}`\n"
-            "Type: **JavaScript module**\n\n"
+            "**Settings -> Dashboards -> three-dot menu -> Resources -> Add Resource**\n\n"
+            f"URL: {CARD_URL}\n"
+            "Type: JavaScript module\n\n"
             "Then hard-refresh your browser (Ctrl+Shift+R)."
         ),
-        title="Domuse Irrigation — Action needed",
+        title="Domuse Irrigation - Action needed",
         notification_id=f"{DOMAIN}_card_resource",
     )
+
+
+def _schedule_duration_seconds(schedule: dict) -> int:
+    if "duration_seconds" in schedule:
+        return int(schedule["duration_seconds"])
+    return int(schedule.get("duration_minutes", 10)) * 60
 
 
 async def _setup_schedules(hass: HomeAssistant, entry_id: str) -> None:
@@ -154,21 +153,24 @@ async def _setup_schedules(hass: HomeAssistant, entry_id: str) -> None:
         sid = schedule["id"]
         weekdays = schedule.get("weekdays", [])
         try:
-            hour, minute = map(int, schedule.get("time", "08:00").split(":"))
-        except (ValueError, AttributeError):
-            _LOGGER.warning("Invalid time in schedule %s — skipping.", sid)
+            parts = schedule.get("time", "08:00:00").split(":")
+            hour   = int(parts[0])
+            minute = int(parts[1])
+            second = int(parts[2]) if len(parts) > 2 else 0
+        except (ValueError, AttributeError, IndexError):
+            _LOGGER.warning("Invalid time in schedule %s - skipping.", sid)
             continue
         entity_id = schedule.get("pump_entity_id", "")
-        duration = int(schedule.get("duration_minutes", 10))
+        duration = _schedule_duration_seconds(schedule)
 
         async def _fire(now, _eid=entity_id, _dur=duration, _days=weekdays):
             if now.weekday() not in _days:
                 return
-            _LOGGER.debug("Irrigation firing for %s (%d min)", _eid, _dur)
+            _LOGGER.debug("Irrigation firing for %s (%ds)", _eid, _dur)
             await hass.services.async_call("switch", "turn_on", {"entity_id": _eid})
             async_call_later(
                 hass,
-                _dur * 60,
+                _dur,
                 lambda _now, eid=_eid: hass.async_create_task(
                     hass.services.async_call("switch", "turn_off", {"entity_id": eid})
                 ),
@@ -177,7 +179,7 @@ async def _setup_schedules(hass: HomeAssistant, entry_id: str) -> None:
         unsub = async_track_time_change(
             hass,
             lambda now, f=_fire: hass.async_create_task(f(now)),
-            hour=hour, minute=minute, second=0,
+            hour=hour, minute=minute, second=second,
         )
         domain_data["timers"][sid] = unsub
 
@@ -242,7 +244,7 @@ async def ws_remove_pump(hass, connection, msg):
     vol.Required("pump_entity_id"): str,
     vol.Required("weekdays"): list,
     vol.Required("time"): str,
-    vol.Required("duration_minutes"): int,
+    vol.Required("duration_seconds"): int,
     vol.Optional("name", default=""): str,
 })
 @websocket_api.async_response
@@ -258,7 +260,7 @@ async def ws_add_schedule(hass, connection, msg):
         "pump_entity_id": msg["pump_entity_id"],
         "weekdays": msg["weekdays"],
         "time": msg["time"],
-        "duration_minutes": msg["duration_minutes"],
+        "duration_seconds": msg["duration_seconds"],
     }
     dd["data"]["schedules"].append(schedule)
     await dd["store"].async_save(dd["data"])
