@@ -10,6 +10,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.helpers.storage import Store
@@ -51,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.options.get(CONF_SHOW_IN_SIDEBAR, True):
         await _register_panel(hass)
 
-    await _register_card_resource(hass)
+    _schedule_card_resource(hass)
     await _setup_schedules(hass, entry.entry_id)
     entry.async_on_unload(entry.add_update_listener(_async_reload_listener))
     return True
@@ -86,29 +87,40 @@ async def _register_panel(hass: HomeAssistant) -> None:
         pass  # already registered on reload
 
 
-async def _register_card_resource(hass: HomeAssistant) -> None:
-    """Add the card JS to Lovelace resources so it auto-loads on every dashboard."""
-    try:
-        lovelace = hass.data.get("lovelace", {})
-        resources = lovelace.get("resources")
-        if resources is None:
+def _schedule_card_resource(hass: HomeAssistant) -> None:
+    """Register the card JS in Lovelace resources after HA has fully started."""
+
+    async def _do_register(_event=None) -> None:
+        try:
+            from homeassistant.components.lovelace import DOMAIN as LOVELACE_DOMAIN
+            lovelace = hass.data.get(LOVELACE_DOMAIN)
+            if not lovelace:
+                _LOGGER.warning(
+                    "Lovelace not initialised — add %s as a Lovelace resource manually.", CARD_URL
+                )
+                return
+            resources = lovelace.get("resources")
+            if resources is None:
+                _LOGGER.warning(
+                    "Lovelace resource storage unavailable — add %s manually.", CARD_URL
+                )
+                return
+            await resources.async_get_info()
+            for item in resources.async_items():
+                if item.get("url") == CARD_URL:
+                    _LOGGER.debug("Card resource already registered.")
+                    return
+            await resources.async_create_item({"res_type": "module", "url": CARD_URL})
+            _LOGGER.info("Auto-registered Lovelace card resource: %s", CARD_URL)
+        except Exception as err:
             _LOGGER.warning(
-                "Lovelace resources not available — add %s as a resource manually.", CARD_URL
+                "Could not auto-register card resource (%s) — add %s manually.", err, CARD_URL
             )
-            return
 
-        await resources.async_get_info()
-
-        for item in resources.async_items():
-            if item.get("url") == CARD_URL:
-                return  # already registered
-
-        await resources.async_create_item({"res_type": "module", "url": CARD_URL})
-        _LOGGER.debug("Registered Lovelace card resource: %s", CARD_URL)
-    except Exception as err:
-        _LOGGER.warning(
-            "Could not auto-register card resource (%s) — add %s manually.", err, CARD_URL
-        )
+    if hass.is_running:
+        hass.async_create_task(_do_register())
+    else:
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_register)
 
 
 async def _setup_schedules(hass: HomeAssistant, entry_id: str) -> None:
