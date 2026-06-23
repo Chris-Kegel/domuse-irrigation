@@ -83,17 +83,31 @@ async def _register_panel(hass: HomeAssistant) -> None:
             trust_external=False,
         )
     except ValueError:
-        pass  # already registered from a previous setup/reload
+        pass  # already registered on reload
 
 
 async def _register_card_resource(hass: HomeAssistant) -> None:
+    """Add the card JS to Lovelace resources so it auto-loads on every dashboard."""
     try:
-        from homeassistant.components.frontend import add_extra_js_url
-        add_extra_js_url(hass, CARD_URL)
-    except (ImportError, AttributeError):
+        lovelace = hass.data.get("lovelace", {})
+        resources = lovelace.get("resources")
+        if resources is None:
+            _LOGGER.warning(
+                "Lovelace resources not available — add %s as a resource manually.", CARD_URL
+            )
+            return
+
+        await resources.async_get_info()
+
+        for item in resources.async_items():
+            if item.get("url") == CARD_URL:
+                return  # already registered
+
+        await resources.async_create_item({"res_type": "module", "url": CARD_URL})
+        _LOGGER.debug("Registered Lovelace card resource: %s", CARD_URL)
+    except Exception as err:
         _LOGGER.warning(
-            "Could not auto-register Lovelace card. Add %s as a Lovelace resource manually.",
-            CARD_URL,
+            "Could not auto-register card resource (%s) — add %s manually.", err, CARD_URL
         )
 
 
