@@ -1,12 +1,14 @@
 /**
- * domuse-automation-time-card  v1.1.2
+ * domuse-automation-time-card  v1.1.3
  * Lovelace card for viewing and editing time-based triggers + weekday conditions
  * of an existing Home Assistant automation.
  *
- * Uses direct fetch() for REST API calls — avoids any WebSocket dependency.
+ * Uses config/entity_registry/get (WS) to resolve unique_id — hass.entities
+ * only holds display-entries which omit unique_id in modern HA.
+ * Uses direct fetch() for all REST API calls.
  */
 
-const ATW_VERSION = '1.1.2';
+const ATW_VERSION = '1.1.3';
 
 const ATW_DAYS = [
   { key: 'mon', label: 'Mon' },
@@ -39,30 +41,26 @@ class DomAutomationTimeCardEditor extends HTMLElement {
     this._render();
   }
 
-  _automations() {
-    if (!this._hass) return [];
-    return Object.values(this._hass.states ?? {})
-      .filter(function(s) { return s.entity_id.startsWith('automation.'); })
-      .map(function(s) {
-        var entry  = this._hass.entities && this._hass.entities[s.entity_id];
-        var has_id = !!(entry && entry.unique_id);
-        return { entity_id: s.entity_id, alias: s.attributes.friendly_name ?? s.entity_id, has_id: has_id };
-      }.bind(this))
-      .sort(function(a, b) { return (a.alias ?? '').localeCompare(b.alias ?? ''); });
-  }
-
   _esc(s) {
     return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   _render() {
     var current = this._config.automation_entity ?? '';
+    var autos   = Object.values((this._hass && this._hass.states) || {})
+      .filter(function(s) { return s.entity_id.startsWith('automation.'); })
+      .sort(function(a, b) {
+        return ((a.attributes && a.attributes.friendly_name) || a.entity_id)
+          .localeCompare((b.attributes && b.attributes.friendly_name) || b.entity_id);
+      });
+
     var options = '<option value="">Select an automation…</option>';
-    this._automations().forEach(function(a) {
-      var label = a.alias + (!a.has_id ? ' ⚠️ no unique id' : '');
+    for (var i = 0; i < autos.length; i++) {
+      var a     = autos[i];
+      var label = (a.attributes && a.attributes.friendly_name) || a.entity_id;
       var sel   = a.entity_id === current ? ' selected' : '';
       options  += '<option value="' + this._esc(a.entity_id) + '"' + sel + '>' + this._esc(label) + '</option>';
-    }.bind(this));
+    }
 
     this.shadowRoot.innerHTML = (
       '<style>' +
@@ -72,13 +70,8 @@ class DomAutomationTimeCardEditor extends HTMLElement {
         'select { width: 100%; padding: 10px 12px; background: var(--card-background-color, #fff);' +
                  'border: 1px solid var(--divider-color, rgba(0,0,0,.15)); border-radius: 8px;' +
                  'color: var(--primary-text-color); font-size: 14px; outline: none; }' +
-        '.hint { font-size: 11px; color: var(--secondary-text-color); margin-top: 6px; line-height: 1.4; }' +
       '</style>' +
-      '<div class="field">' +
-        '<label>Automation</label>' +
-        '<select id="sel">' + options + '</select>' +
-        '<div class="hint">⚠️ = no unique ID — open the HA automation editor and save it once to enable editing.</div>' +
-      '</div>'
+      '<div class="field"><label>Automation</label><select id="sel">' + options + '</select></div>'
     );
 
     var self = this;
@@ -103,6 +96,7 @@ class DomAutomationTimeCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._hass       = null;
     this._config     = null;
+    this._autoId     = null;   // resolved unique_id / config id
     this._autoConfig = null;
     this._loading    = false;
     this._error      = null;
@@ -132,6 +126,7 @@ class DomAutomationTimeCard extends HTMLElement {
   }
 
   _reset() {
+    this._autoId     = null;
     this._autoConfig = null;
     this._editTimes  = null;
     this._editDays   = null;
@@ -140,30 +135,30 @@ class DomAutomationTimeCard extends HTMLElement {
     this._dirty      = false;
   }
 
-  /* Resolve the automation unique_id from the entity registry.
-     HA uses this as the config ID in its REST API. */
-  _getAutoId() {
-    var eid   = this._config && this._config.automation_entity;
+  /* Fetch the full entity registry entry via WebSocket to get unique_id.
+     hass.entities only has display-entries (no unique_id) in modern HA. */
+  async _resolveAutoId() {
+    var eid = this._config && this._config.automation_entity;
     if (!eid) return null;
-    var entry = this._hass.entities && this._hass.entities[eid];
-    return (entry && entry.unique_id) ? entry.unique_id : null;
+    try {
+      var entry = await this._hass.callWS({ type: 'config/entity_registry/get', entity_id: eid });
+      return (entry && entry.unique_id) ? entry.unique_id : null;
+    } catch (e) {
+      return null;
+    }
   }
 
-  /* Get the HA base URL and bearer token for direct fetch() calls. */
+  /* Direct HTTP REST call — no WebSocket. */
   _authHeaders() {
     var token = this._hass.auth && this._hass.auth.data && this._hass.auth.data.access_token;
     return { 'Authorization': 'Bearer ' + (token || ''), 'Content-Type': 'application/json' };
   }
-
   _hassUrl() {
     return (this._hass.auth && this._hass.auth.data && this._hass.auth.data.hassUrl) || '';
   }
 
-  /* Direct fetch to HA REST API — no WebSocket involved. */
   async _apiGet(path) {
-    var resp = await fetch(this._hassUrl() + '/api/' + path, {
-      headers: this._authHeaders(),
-    });
+    var resp = await fetch(this._hassUrl() + '/api/' + path, { headers: this._authHeaders() });
     if (!resp.ok) {
       var body = await resp.json().catch(function() { return {}; });
       throw new Error(body.message || (resp.status + ' ' + resp.statusText));
@@ -191,16 +186,20 @@ class DomAutomationTimeCard extends HTMLElement {
     this._render();
 
     try {
-      var autoId = this._getAutoId();
-      if (!autoId) {
-        this._error = 'This automation has no unique ID and cannot be edited here. '
-          + 'Open the HA Automation editor, save it once (no changes needed), then reload this card.';
+      this._autoId = await this._resolveAutoId();
+
+      if (!this._autoId) {
+        this._error = (
+          'Could not find a unique ID for this automation. ' +
+          'Make sure it was created or saved via the HA Automation editor. ' +
+          'YAML-only automations need an "id:" field.'
+        );
         this._loading = false;
         this._render();
         return;
       }
 
-      this._autoConfig = await this._apiGet('config/automation/config/' + autoId);
+      this._autoConfig = await this._apiGet('config/automation/config/' + this._autoId);
       this._editTimes  = this._extractTimes(this._autoConfig);
       this._editDays   = this._extractDays(this._autoConfig);
       this._dirty      = false;
@@ -232,7 +231,7 @@ class DomAutomationTimeCard extends HTMLElement {
   }
 
   async _save() {
-    if (this._saving || !this._autoConfig) return;
+    if (this._saving || !this._autoConfig || !this._autoId) return;
     this._saving = true;
     this._renderBody();
 
@@ -241,7 +240,6 @@ class DomAutomationTimeCard extends HTMLElement {
       cfg.trigger   = cfg.trigger   || [];
       cfg.condition = cfg.condition || [];
 
-      // Update / add time trigger
       var ti = -1;
       for (var i = 0; i < cfg.trigger.length; i++) {
         if (cfg.trigger[i].platform === 'time') { ti = i; break; }
@@ -250,7 +248,6 @@ class DomAutomationTimeCard extends HTMLElement {
       if (ti >= 0) { cfg.trigger[ti].at = atValue; }
       else         { cfg.trigger.push({ platform: 'time', at: atValue }); }
 
-      // Update / add / remove weekday condition
       var ci = -1;
       for (var j = 0; j < cfg.condition.length; j++) {
         if (cfg.condition[j].condition === 'time' && cfg.condition[j].weekday !== undefined) { ci = j; break; }
@@ -262,9 +259,7 @@ class DomAutomationTimeCard extends HTMLElement {
         cfg.condition.splice(ci, 1);
       }
 
-      var autoId = this._getAutoId();
-      if (!autoId) throw new Error('No unique ID for automation.');
-      await this._apiPost('config/automation/config/' + autoId, cfg);
+      await this._apiPost('config/automation/config/' + this._autoId, cfg);
       await this._hass.callService('automation', 'reload');
       this._autoConfig = cfg;
       this._dirty      = false;
