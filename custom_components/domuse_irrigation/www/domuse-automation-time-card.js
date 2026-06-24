@@ -21,14 +21,13 @@ class DomAutomationTimeCardEditor extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    this._hass        = null;
-    this._config      = {};
-    this._automations = [];
+    this._hass   = null;
+    this._config = {};
   }
 
   set hass(hass) {
     this._hass = hass;
-    this._fetchAutomations();
+    this._render();
   }
 
   setConfig(config) {
@@ -36,20 +35,18 @@ class DomAutomationTimeCardEditor extends HTMLElement {
     this._render();
   }
 
-  async _fetchAutomations() {
-    try {
-      this._automations = await this._hass.callWS({ type: 'config/automation/list' });
-    } catch (_) {
-      this._automations = Object.values(this._hass.states ?? {})
-        .filter(function(s) { return s.entity_id.startsWith('automation.'); })
-        .map(function(s) {
-          return { alias: s.attributes.friendly_name ?? s.entity_id, entity_id: s.entity_id, id: null };
-        });
-    }
-    this._automations.sort(function(a, b) {
-      return (a.alias ?? a.entity_id ?? '').localeCompare(b.alias ?? b.entity_id ?? '');
-    });
-    this._render();
+  _automations() {
+    if (!this._hass) return [];
+    return Object.values(this._hass.states ?? {})
+      .filter(function(s) { return s.entity_id.startsWith('automation.'); })
+      .map(function(s) {
+        return {
+          entity_id: s.entity_id,
+          alias: s.attributes.friendly_name ?? s.entity_id,
+          has_id: !!(this._hass.entities && this._hass.entities[s.entity_id] && this._hass.entities[s.entity_id].unique_id),
+        };
+      }.bind(this))
+      .sort(function(a, b) { return (a.alias ?? '').localeCompare(b.alias ?? ''); });
   }
 
   _esc(s) {
@@ -59,11 +56,10 @@ class DomAutomationTimeCardEditor extends HTMLElement {
   _render() {
     var current = this._config.automation_entity ?? '';
     var options = '<option value="">Select an automation…</option>';
-    this._automations.forEach(function(a) {
-      var eid     = a.entity_id ?? '';
-      var label   = (a.alias ?? eid) + (!a.id ? ' (no unique id)' : '');
-      var sel     = eid === current ? ' selected' : '';
-      options    += '<option value="' + this._esc(eid) + '"' + sel + '>' + this._esc(label) + '</option>';
+    this._automations().forEach(function(a) {
+      var label = a.alias + (!a.has_id ? ' ⚠️ no unique id' : '');
+      var sel   = a.entity_id === current ? ' selected' : '';
+      options  += '<option value="' + this._esc(a.entity_id) + '"' + sel + '>' + this._esc(label) + '</option>';
     }.bind(this));
 
     this.shadowRoot.innerHTML = (
@@ -74,10 +70,12 @@ class DomAutomationTimeCardEditor extends HTMLElement {
         'select { width: 100%; padding: 10px 12px; background: var(--card-background-color, #fff);' +
                  'border: 1px solid var(--divider-color, rgba(0,0,0,.15)); border-radius: 8px;' +
                  'color: var(--primary-text-color); font-size: 14px; outline: none; }' +
+        '.hint { font-size: 11px; color: var(--secondary-text-color); margin-top: 6px; line-height: 1.4; }' +
       '</style>' +
       '<div class="field">' +
         '<label>Automation</label>' +
         '<select id="sel">' + options + '</select>' +
+        '<div class="hint">Automations marked ⚠️ have no unique ID. Open the HA automation editor and save once to enable editing.</div>' +
       '</div>'
     );
 
@@ -103,11 +101,11 @@ class DomAutomationTimeCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._hass       = null;
     this._config     = null;
-    this._autoConfig = null;   // full HA automation config object
+    this._autoConfig = null;
     this._loading    = false;
     this._error      = null;
-    this._editTimes  = null;   // string[] — times being edited
-    this._editDays   = null;   // string[] — weekday keys being edited
+    this._editTimes  = null;
+    this._editDays   = null;
     this._saving     = false;
     this._dirty      = false;
   }
@@ -142,6 +140,15 @@ class DomAutomationTimeCard extends HTMLElement {
     this._dirty      = false;
   }
 
+  /* Get the automation unique_id from hass.entities (entity registry).
+     HA uses this same value as the config ID in its REST API. */
+  _getAutoId() {
+    var eid = this._config && this._config.automation_entity;
+    if (!eid) return null;
+    var entry = this._hass.entities && this._hass.entities[eid];
+    return (entry && entry.unique_id) ? entry.unique_id : null;
+  }
+
   async _loadConfig() {
     if (!this._config || !this._config.automation_entity) return;
     this._loading = true;
@@ -149,21 +156,17 @@ class DomAutomationTimeCard extends HTMLElement {
     this._render();
 
     try {
-      var list  = await this._hass.callWS({ type: 'config/automation/list' });
-      var match = null;
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].entity_id === this._config.automation_entity) { match = list[i]; break; }
-      }
+      var autoId = this._getAutoId();
 
-      if (!match || !match.id) {
+      if (!autoId) {
         this._error = 'This automation has no unique ID and cannot be edited here. '
-          + 'Open the HA automation editor, save it once, then return here.';
+          + 'Open the HA Automation editor, save it once (no changes needed), then reload this card.';
         this._loading = false;
         this._render();
         return;
       }
 
-      this._autoConfig = await this._hass.callApi('GET', 'config/automation/config/' + match.id);
+      this._autoConfig = await this._hass.callApi('GET', 'config/automation/config/' + autoId);
       this._editTimes  = this._extractTimes(this._autoConfig);
       this._editDays   = this._extractDays(this._autoConfig);
       this._dirty      = false;
@@ -202,10 +205,9 @@ class DomAutomationTimeCard extends HTMLElement {
 
     try {
       var cfg = JSON.parse(JSON.stringify(this._autoConfig));
-      cfg.trigger = cfg.trigger || [];
+      cfg.trigger   = cfg.trigger   || [];
       cfg.condition = cfg.condition || [];
 
-      // Update / add time trigger
       var ti = -1;
       for (var i = 0; i < cfg.trigger.length; i++) {
         if (cfg.trigger[i].platform === 'time') { ti = i; break; }
@@ -217,7 +219,6 @@ class DomAutomationTimeCard extends HTMLElement {
         cfg.trigger.push({ platform: 'time', at: atValue });
       }
 
-      // Update / add / remove weekday condition
       var ci = -1;
       for (var j = 0; j < cfg.condition.length; j++) {
         if (cfg.condition[j].condition === 'time' && cfg.condition[j].weekday !== undefined) { ci = j; break; }
@@ -232,12 +233,9 @@ class DomAutomationTimeCard extends HTMLElement {
         cfg.condition.splice(ci, 1);
       }
 
-      var list  = await this._hass.callWS({ type: 'config/automation/list' });
-      var match = null;
-      for (var k = 0; k < list.length; k++) {
-        if (list[k].entity_id === this._config.automation_entity) { match = list[k]; break; }
-      }
-      await this._hass.callApi('POST', 'config/automation/config/' + match.id, cfg);
+      var autoId = this._getAutoId();
+      if (!autoId) throw new Error('No unique ID for automation.');
+      await this._hass.callApi('POST', 'config/automation/config/' + autoId, cfg);
       await this._hass.callService('automation', 'reload');
       this._autoConfig = cfg;
       this._dirty      = false;
@@ -253,15 +251,15 @@ class DomAutomationTimeCard extends HTMLElement {
   _syncToggle() {
     var btn = this.shadowRoot && this.shadowRoot.querySelector('.auto-toggle');
     if (!btn) return;
-    var state = this._hass && this._config && this._hass.states[this._config.automation_entity]
-              ? this._hass.states[this._config.automation_entity].state : 'unknown';
+    var stateObj = this._hass && this._config && this._hass.states[this._config.automation_entity];
+    var state = stateObj ? stateObj.state : 'unknown';
     btn.classList.toggle('on', state === 'on');
     btn.dataset.state = state;
   }
 
   async _toggleAuto() {
-    var state = this._hass.states[this._config.automation_entity]
-              ? this._hass.states[this._config.automation_entity].state : 'off';
+    var stateObj = this._hass.states[this._config.automation_entity];
+    var state = stateObj ? stateObj.state : 'off';
     await this._hass.callService('automation', state === 'on' ? 'turn_off' : 'turn_on',
       { entity_id: this._config.automation_entity });
   }
@@ -304,13 +302,11 @@ class DomAutomationTimeCard extends HTMLElement {
     this._renderBody();
   }
 
-  /* ─── RENDER ─── */
-
   _render() {
-    var entity = this._config && this._config.automation_entity;
+    var entity   = this._config && this._config.automation_entity;
     var stateObj = entity && this._hass && this._hass.states[entity];
-    var name  = stateObj ? (stateObj.attributes.friendly_name || entity) : (entity || 'Automation');
-    var state = stateObj ? stateObj.state : 'unknown';
+    var name     = stateObj ? (stateObj.attributes.friendly_name || entity) : (entity || 'Automation');
+    var state    = stateObj ? stateObj.state : 'unknown';
 
     this.shadowRoot.innerHTML = (
       this._css() +
@@ -388,7 +384,7 @@ class DomAutomationTimeCard extends HTMLElement {
         'Add Time' +
       '</button>' +
       '<div class="section-label" style="margin-top:18px">' +
-        'Active Days <span class="days-hint">(leave empty = every day)</span>' +
+        'Active Days <span class="days-hint">(empty = every day)</span>' +
       '</div>' +
       '<div class="day-picker">' + daysHTML + '</div>' +
       actionsHTML
