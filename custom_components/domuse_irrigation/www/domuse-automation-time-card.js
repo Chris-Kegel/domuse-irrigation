@@ -1,8 +1,12 @@
 /**
- * domuse-automation-time-card
+ * domuse-automation-time-card  v1.1.2
  * Lovelace card for viewing and editing time-based triggers + weekday conditions
  * of an existing Home Assistant automation.
+ *
+ * Uses direct fetch() for REST API calls — avoids any WebSocket dependency.
  */
+
+const ATW_VERSION = '1.1.2';
 
 const ATW_DAYS = [
   { key: 'mon', label: 'Mon' },
@@ -15,7 +19,7 @@ const ATW_DAYS = [
 ];
 
 /* ════════════════════════════════════════
-   Card Editor  (appears in Lovelace UI editor)
+   Card Editor
    ════════════════════════════════════════ */
 class DomAutomationTimeCardEditor extends HTMLElement {
   constructor() {
@@ -40,17 +44,15 @@ class DomAutomationTimeCardEditor extends HTMLElement {
     return Object.values(this._hass.states ?? {})
       .filter(function(s) { return s.entity_id.startsWith('automation.'); })
       .map(function(s) {
-        return {
-          entity_id: s.entity_id,
-          alias: s.attributes.friendly_name ?? s.entity_id,
-          has_id: !!(this._hass.entities && this._hass.entities[s.entity_id] && this._hass.entities[s.entity_id].unique_id),
-        };
+        var entry  = this._hass.entities && this._hass.entities[s.entity_id];
+        var has_id = !!(entry && entry.unique_id);
+        return { entity_id: s.entity_id, alias: s.attributes.friendly_name ?? s.entity_id, has_id: has_id };
       }.bind(this))
       .sort(function(a, b) { return (a.alias ?? '').localeCompare(b.alias ?? ''); });
   }
 
   _esc(s) {
-    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   _render() {
@@ -75,7 +77,7 @@ class DomAutomationTimeCardEditor extends HTMLElement {
       '<div class="field">' +
         '<label>Automation</label>' +
         '<select id="sel">' + options + '</select>' +
-        '<div class="hint">Automations marked ⚠️ have no unique ID. Open the HA automation editor and save once to enable editing.</div>' +
+        '<div class="hint">⚠️ = no unique ID — open the HA automation editor and save it once to enable editing.</div>' +
       '</div>'
     );
 
@@ -117,9 +119,7 @@ class DomAutomationTimeCard extends HTMLElement {
   setConfig(config) {
     var prevEntity = this._config && this._config.automation_entity;
     this._config = config;
-    if (prevEntity !== config.automation_entity) {
-      this._reset();
-    }
+    if (prevEntity !== config.automation_entity) this._reset();
     this._render();
   }
 
@@ -140,13 +140,48 @@ class DomAutomationTimeCard extends HTMLElement {
     this._dirty      = false;
   }
 
-  /* Get the automation unique_id from hass.entities (entity registry).
-     HA uses this same value as the config ID in its REST API. */
+  /* Resolve the automation unique_id from the entity registry.
+     HA uses this as the config ID in its REST API. */
   _getAutoId() {
-    var eid = this._config && this._config.automation_entity;
+    var eid   = this._config && this._config.automation_entity;
     if (!eid) return null;
     var entry = this._hass.entities && this._hass.entities[eid];
     return (entry && entry.unique_id) ? entry.unique_id : null;
+  }
+
+  /* Get the HA base URL and bearer token for direct fetch() calls. */
+  _authHeaders() {
+    var token = this._hass.auth && this._hass.auth.data && this._hass.auth.data.access_token;
+    return { 'Authorization': 'Bearer ' + (token || ''), 'Content-Type': 'application/json' };
+  }
+
+  _hassUrl() {
+    return (this._hass.auth && this._hass.auth.data && this._hass.auth.data.hassUrl) || '';
+  }
+
+  /* Direct fetch to HA REST API — no WebSocket involved. */
+  async _apiGet(path) {
+    var resp = await fetch(this._hassUrl() + '/api/' + path, {
+      headers: this._authHeaders(),
+    });
+    if (!resp.ok) {
+      var body = await resp.json().catch(function() { return {}; });
+      throw new Error(body.message || (resp.status + ' ' + resp.statusText));
+    }
+    return resp.json();
+  }
+
+  async _apiPost(path, data) {
+    var resp = await fetch(this._hassUrl() + '/api/' + path, {
+      method: 'POST',
+      headers: this._authHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!resp.ok) {
+      var body = await resp.json().catch(function() { return {}; });
+      throw new Error(body.message || (resp.status + ' ' + resp.statusText));
+    }
+    return resp.json().catch(function() { return {}; });
   }
 
   async _loadConfig() {
@@ -157,7 +192,6 @@ class DomAutomationTimeCard extends HTMLElement {
 
     try {
       var autoId = this._getAutoId();
-
       if (!autoId) {
         this._error = 'This automation has no unique ID and cannot be edited here. '
           + 'Open the HA Automation editor, save it once (no changes needed), then reload this card.';
@@ -166,7 +200,7 @@ class DomAutomationTimeCard extends HTMLElement {
         return;
       }
 
-      this._autoConfig = await this._hass.callApi('GET', 'config/automation/config/' + autoId);
+      this._autoConfig = await this._apiGet('config/automation/config/' + autoId);
       this._editTimes  = this._extractTimes(this._autoConfig);
       this._editDays   = this._extractDays(this._autoConfig);
       this._dirty      = false;
@@ -180,14 +214,13 @@ class DomAutomationTimeCard extends HTMLElement {
 
   _extractTimes(cfg) {
     var triggers = cfg.trigger || [];
-    var trig = null;
     for (var i = 0; i < triggers.length; i++) {
-      if (triggers[i].platform === 'time') { trig = triggers[i]; break; }
+      if (triggers[i].platform === 'time') {
+        var at = triggers[i].at;
+        return Array.isArray(at) ? at.slice() : (at ? [at] : []);
+      }
     }
-    if (!trig) return [];
-    var at = trig.at;
-    if (Array.isArray(at)) return at.slice();
-    return at ? [at] : [];
+    return [];
   }
 
   _extractDays(cfg) {
@@ -204,38 +237,34 @@ class DomAutomationTimeCard extends HTMLElement {
     this._renderBody();
 
     try {
-      var cfg = JSON.parse(JSON.stringify(this._autoConfig));
+      var cfg       = JSON.parse(JSON.stringify(this._autoConfig));
       cfg.trigger   = cfg.trigger   || [];
       cfg.condition = cfg.condition || [];
 
+      // Update / add time trigger
       var ti = -1;
       for (var i = 0; i < cfg.trigger.length; i++) {
         if (cfg.trigger[i].platform === 'time') { ti = i; break; }
       }
       var atValue = this._editTimes.length === 1 ? this._editTimes[0] : this._editTimes.slice();
-      if (ti >= 0) {
-        cfg.trigger[ti].at = atValue;
-      } else {
-        cfg.trigger.push({ platform: 'time', at: atValue });
-      }
+      if (ti >= 0) { cfg.trigger[ti].at = atValue; }
+      else         { cfg.trigger.push({ platform: 'time', at: atValue }); }
 
+      // Update / add / remove weekday condition
       var ci = -1;
       for (var j = 0; j < cfg.condition.length; j++) {
         if (cfg.condition[j].condition === 'time' && cfg.condition[j].weekday !== undefined) { ci = j; break; }
       }
       if (this._editDays.length > 0) {
-        if (ci >= 0) {
-          cfg.condition[ci].weekday = this._editDays.slice();
-        } else {
-          cfg.condition.push({ condition: 'time', weekday: this._editDays.slice() });
-        }
+        if (ci >= 0) { cfg.condition[ci].weekday = this._editDays.slice(); }
+        else         { cfg.condition.push({ condition: 'time', weekday: this._editDays.slice() }); }
       } else if (ci >= 0) {
         cfg.condition.splice(ci, 1);
       }
 
       var autoId = this._getAutoId();
       if (!autoId) throw new Error('No unique ID for automation.');
-      await this._hass.callApi('POST', 'config/automation/config/' + autoId, cfg);
+      await this._apiPost('config/automation/config/' + autoId, cfg);
       await this._hass.callService('automation', 'reload');
       this._autoConfig = cfg;
       this._dirty      = false;
@@ -252,37 +281,21 @@ class DomAutomationTimeCard extends HTMLElement {
     var btn = this.shadowRoot && this.shadowRoot.querySelector('.auto-toggle');
     if (!btn) return;
     var stateObj = this._hass && this._config && this._hass.states[this._config.automation_entity];
-    var state = stateObj ? stateObj.state : 'unknown';
+    var state    = stateObj ? stateObj.state : 'unknown';
     btn.classList.toggle('on', state === 'on');
     btn.dataset.state = state;
   }
 
   async _toggleAuto() {
     var stateObj = this._hass.states[this._config.automation_entity];
-    var state = stateObj ? stateObj.state : 'off';
+    var state    = stateObj ? stateObj.state : 'off';
     await this._hass.callService('automation', state === 'on' ? 'turn_off' : 'turn_on',
       { entity_id: this._config.automation_entity });
   }
 
-  _setTime(idx, val) {
-    this._editTimes = this._editTimes.slice();
-    this._editTimes[idx] = val;
-    this._dirty = true;
-    this._renderBody();
-  }
-
-  _addTime() {
-    this._editTimes = this._editTimes.slice();
-    this._editTimes.push('08:00:00');
-    this._dirty = true;
-    this._renderBody();
-  }
-
-  _removeTime(idx) {
-    this._editTimes = this._editTimes.filter(function(_, i) { return i !== idx; });
-    this._dirty = true;
-    this._renderBody();
-  }
+  _setTime(idx, val)  { this._editTimes = this._editTimes.slice(); this._editTimes[idx] = val; this._dirty = true; this._renderBody(); }
+  _addTime()          { this._editTimes = this._editTimes.concat(['08:00:00']); this._dirty = true; this._renderBody(); }
+  _removeTime(idx)    { this._editTimes = this._editTimes.filter(function(_, i) { return i !== idx; }); this._dirty = true; this._renderBody(); }
 
   _toggleDay(key) {
     if (this._editDays.indexOf(key) >= 0) {
@@ -302,6 +315,8 @@ class DomAutomationTimeCard extends HTMLElement {
     this._renderBody();
   }
 
+  /* ─── RENDER ─── */
+
   _render() {
     var entity   = this._config && this._config.automation_entity;
     var stateObj = entity && this._hass && this._hass.states[entity];
@@ -313,10 +328,9 @@ class DomAutomationTimeCard extends HTMLElement {
       '<ha-card>' +
         '<div class="card-header">' +
           '<div class="header-left">' +
-            '<svg viewBox="0 0 24 24">' +
-              '<path d="M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5C3.89 3 3.01 3.9 3.01 5L3 19c0 1.1.89 2 2 2h14' +
-                       'c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2h-1V1h-2zm3 18H5V8h14v11z"/>' +
-            '</svg>' +
+            '<svg viewBox="0 0 24 24"><path d="M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5C3.89 3 3.01 3.9 3.01 5' +
+                                             'L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2h-1V1h-2' +
+                                             'zm3 18H5V8h14v11z"/></svg>' +
             '<span class="card-title">' + this._esc(name) + '</span>' +
           '</div>' +
           '<button class="auto-toggle ' + (state === 'on' ? 'on' : '') + '" id="auto-toggle" data-state="' + state + '"></button>' +
@@ -324,7 +338,6 @@ class DomAutomationTimeCard extends HTMLElement {
         '<div class="card-body" id="card-body">' + this._bodyHTML() + '</div>' +
       '</ha-card>'
     );
-
     this._bindAll();
   }
 
@@ -335,11 +348,10 @@ class DomAutomationTimeCard extends HTMLElement {
   }
 
   _bodyHTML() {
-    if (!this._config || !this._config.automation_entity) {
+    if (!this._config || !this._config.automation_entity)
       return '<div class="msg">Select an automation in the card settings (pencil icon).</div>';
-    }
-    if (this._loading) return '<div class="spinner-wrap"><div class="spinner"></div></div>';
-    if (this._error)   return '<div class="msg error">' + this._esc(this._error) + '</div>';
+    if (this._loading)     return '<div class="spinner-wrap"><div class="spinner"></div></div>';
+    if (this._error)       return '<div class="msg error">' + this._esc(this._error) + '</div>';
     if (!this._autoConfig) return '<div class="spinner-wrap"><div class="spinner"></div></div>';
 
     var timesHTML = '';
@@ -380,28 +392,26 @@ class DomAutomationTimeCard extends HTMLElement {
       '<div class="section-label">Time Triggers</div>' +
       (times.length === 0 ? '<div class="empty-msg">No time triggers — add one below.</div>' : timesHTML) +
       '<button class="add-time-btn" id="add-time">' +
-        '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>' +
-        'Add Time' +
+        '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>Add Time' +
       '</button>' +
-      '<div class="section-label" style="margin-top:18px">' +
-        'Active Days <span class="days-hint">(empty = every day)</span>' +
-      '</div>' +
+      '<div class="section-label" style="margin-top:18px">Active Days ' +
+        '<span class="days-hint">(empty = every day)</span></div>' +
       '<div class="day-picker">' + daysHTML + '</div>' +
-      actionsHTML
+      actionsHTML +
+      '<div class="version">v' + ATW_VERSION + '</div>'
     );
   }
 
   _bindAll() {
     var self = this;
-    var toggleBtn = this.shadowRoot.getElementById('auto-toggle');
-    if (toggleBtn) toggleBtn.addEventListener('click', function() { self._toggleAuto(); });
+    var btn  = this.shadowRoot.getElementById('auto-toggle');
+    if (btn) btn.addEventListener('click', function() { self._toggleAuto(); });
     this._bindBody();
   }
 
   _bindBody() {
     var self = this;
     var sr   = this.shadowRoot;
-
     sr.querySelectorAll('.time-input').forEach(function(inp) {
       inp.addEventListener('change', function(e) { self._setTime(parseInt(e.target.dataset.idx, 10), e.target.value); });
     });
@@ -410,11 +420,9 @@ class DomAutomationTimeCard extends HTMLElement {
     });
     var addTime = sr.getElementById('add-time');
     if (addTime) addTime.addEventListener('click', function() { self._addTime(); });
-
     sr.querySelectorAll('.day-btn').forEach(function(btn) {
       btn.addEventListener('click', function() { self._toggleDay(btn.dataset.day); });
     });
-
     var saveBtn   = sr.getElementById('btn-save');
     var cancelBtn = sr.getElementById('btn-cancel');
     if (saveBtn)   saveBtn.addEventListener('click', function() { self._save(); });
@@ -422,7 +430,7 @@ class DomAutomationTimeCard extends HTMLElement {
   }
 
   _esc(s) {
-    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   _css() {
@@ -430,49 +438,40 @@ class DomAutomationTimeCard extends HTMLElement {
       '<style>' +
         ':host { display: block; }' +
         'ha-card { overflow: hidden; }' +
-
         '.card-header { display: flex; align-items: center; justify-content: space-between;' +
                        'padding: 14px 18px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.08)); }' +
         '.header-left { display: flex; align-items: center; gap: 10px; }' +
         '.header-left svg { width: 22px; height: 22px; fill: #0E9CA5; flex-shrink: 0; }' +
         '.card-title { font-size: 16px; font-weight: 600; color: var(--primary-text-color); }' +
-
         '.auto-toggle { width: 50px; height: 28px; border-radius: 14px; border: none; cursor: pointer;' +
                        'outline: none; background: rgba(0,0,0,.12); position: relative;' +
-                       'transition: background .2s; flex-shrink: 0; -webkit-tap-highlight-color: transparent; }' +
-        '.auto-toggle::after { content: ""; position: absolute; width: 22px; height: 22px; border-radius: 50%;' +
-                               'background: #fff; top: 3px; left: 3px; transition: transform .2s;' +
-                               'box-shadow: 0 1px 4px rgba(0,0,0,.3); }' +
+                       'transition: background .2s; flex-shrink: 0; }' +
+        '.auto-toggle::after { content: ""; position: absolute; width: 22px; height: 22px;' +
+                               'border-radius: 50%; background: #fff; top: 3px; left: 3px;' +
+                               'transition: transform .2s; box-shadow: 0 1px 4px rgba(0,0,0,.3); }' +
         '.auto-toggle.on { background: #0E9CA5; }' +
         '.auto-toggle.on::after { transform: translateX(22px); }' +
-
         '.card-body { padding: 16px 18px; }' +
-
         '.section-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;' +
                          'color: var(--secondary-text-color, #94a3b8); margin-bottom: 10px; }' +
         '.days-hint { font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .65; }' +
-
         '.time-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }' +
         '.time-input { flex: 1; padding: 9px 12px;' +
                       'background: var(--secondary-background-color, rgba(0,0,0,.04));' +
                       'border: 1px solid var(--divider-color, rgba(0,0,0,.12));' +
-                      'border-radius: 8px; color: var(--primary-text-color); font-size: 15px;' +
-                      'outline: none; transition: border-color .15s; }' +
+                      'border-radius: 8px; color: var(--primary-text-color); font-size: 15px; outline: none; }' +
         '.time-input:focus { border-color: #0E9CA5; }' +
-
         '.remove-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: none;' +
                       'cursor: pointer; display: flex; align-items: center; justify-content: center;' +
-                      'color: var(--secondary-text-color, #94a3b8); transition: background .15s, color .15s; flex-shrink: 0; }' +
+                      'color: var(--secondary-text-color, #94a3b8); flex-shrink: 0; }' +
         '.remove-btn:hover { background: rgba(239,68,68,.1); color: #ef4444; }' +
         '.remove-btn svg { width: 18px; height: 18px; fill: currentColor; }' +
-
         '.add-time-btn { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 4px;' +
                         'padding: 7px 14px; border: 1px dashed var(--divider-color, rgba(0,0,0,.2));' +
                         'border-radius: 8px; background: none; color: #0E9CA5;' +
-                        'font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s; }' +
+                        'font-size: 13px; font-weight: 600; cursor: pointer; }' +
         '.add-time-btn:hover { background: rgba(14,156,165,.08); }' +
         '.add-time-btn svg { width: 16px; height: 16px; fill: currentColor; }' +
-
         '.day-picker { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 4px; }' +
         '.day-btn { width: 42px; height: 42px; border-radius: 50%;' +
                    'border: 2px solid var(--divider-color, rgba(0,0,0,.12));' +
@@ -480,18 +479,15 @@ class DomAutomationTimeCard extends HTMLElement {
                    'font-size: 11px; font-weight: 700; cursor: pointer; transition: all .15s; }' +
         '.day-btn:hover { border-color: #0E9CA5; }' +
         '.day-btn.sel { background: #0E9CA5; border-color: #0E9CA5; color: #fff; }' +
-
         '.actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;' +
                    'padding-top: 16px; border-top: 1px solid var(--divider-color, rgba(0,0,0,.08)); }' +
         '.btn-primary { padding: 9px 18px; border: none; border-radius: 8px; background: #0E9CA5;' +
-                       'color: #fff; font-size: 13px; font-weight: 700; cursor: pointer; transition: opacity .15s; }' +
+                       'color: #fff; font-size: 13px; font-weight: 700; cursor: pointer; }' +
         '.btn-primary:hover { opacity: .85; }' +
         '.btn-primary.saving { opacity: .6; cursor: not-allowed; }' +
         '.btn-secondary { padding: 9px 18px; border: 1px solid var(--divider-color, rgba(0,0,0,.15));' +
                          'border-radius: 8px; background: none; color: var(--secondary-text-color);' +
-                         'font-size: 13px; cursor: pointer; transition: background .15s; }' +
-        '.btn-secondary:hover { background: rgba(0,0,0,.04); }' +
-
+                         'font-size: 13px; cursor: pointer; }' +
         '.empty-msg { font-size: 13px; color: var(--secondary-text-color, #94a3b8); margin-bottom: 12px; }' +
         '.msg { padding: 16px; font-size: 13px; color: var(--secondary-text-color); line-height: 1.5; }' +
         '.msg.error { color: #ef4444; }' +
@@ -500,6 +496,8 @@ class DomAutomationTimeCard extends HTMLElement {
                    'border: 3px solid rgba(0,0,0,.1); border-top-color: #0E9CA5;' +
                    'animation: spin .7s linear infinite; }' +
         '@keyframes spin { to { transform: rotate(360deg); } }' +
+        '.version { font-size: 10px; color: var(--secondary-text-color); opacity: .4;' +
+                   'text-align: right; margin-top: 12px; }' +
       '</style>'
     );
   }
