@@ -8,7 +8,7 @@
  * Uses direct fetch() for all REST API calls.
  */
 
-const ATW_VERSION = '1.1.4';
+const ATW_VERSION = '1.1.5';
 
 const ATW_DAYS = [
   { key: 'mon', label: 'Mon' },
@@ -211,23 +211,41 @@ class DomAutomationTimeCard extends HTMLElement {
     this._render();
   }
 
-  _extractTimes(cfg) {
-    // HA 2024+ uses 'triggers' (plural); older HA uses 'trigger'.
-    var triggers = cfg.triggers || cfg.trigger || [];
+  /* Find the first time trigger regardless of old (platform) or new (trigger) key. */
+  _findTimeTrigger(triggers) {
     for (var i = 0; i < triggers.length; i++) {
-      if (triggers[i].platform === 'time') {
-        var at = triggers[i].at;
-        return Array.isArray(at) ? at.slice() : (at ? [at] : []);
-      }
+      if (triggers[i].platform === 'time' || triggers[i].trigger === 'time') return i;
     }
-    return [];
+    return -1;
+  }
+
+  _extractTimes(cfg) {
+    var triggers = cfg.triggers || cfg.trigger || [];
+    var ti = this._findTimeTrigger(triggers);
+    if (ti < 0) return [];
+    var at = triggers[ti].at;
+    return Array.isArray(at) ? at.slice() : (at ? [at] : []);
   }
 
   _extractDays(cfg) {
-    // HA 2024+ uses 'conditions' (plural); older HA uses 'condition'.
-    var conds = cfg.conditions || cfg.condition || [];
-    for (var i = 0; i < conds.length; i++) {
-      if (conds[i].condition === 'time' && conds[i].weekday) return conds[i].weekday.slice();
+    // HA 2024+: weekday conditions live inside the trigger object as trigger.conditions[].
+    // Older format: top-level condition array. Read both; trigger-level takes priority.
+    var triggers = cfg.triggers || cfg.trigger || [];
+    var ti = this._findTimeTrigger(triggers);
+    if (ti >= 0) {
+      var innerConds = triggers[ti].conditions || triggers[ti].condition || [];
+      for (var i = 0; i < innerConds.length; i++) {
+        if (innerConds[i].condition === 'time' && innerConds[i].weekday) {
+          return innerConds[i].weekday.slice();
+        }
+      }
+    }
+    // Fallback: check global conditions (automations saved by older card versions).
+    var globalConds = cfg.conditions || cfg.condition || [];
+    for (var j = 0; j < globalConds.length; j++) {
+      if (globalConds[j].condition === 'time' && globalConds[j].weekday) {
+        return globalConds[j].weekday.slice();
+      }
     }
     return [];
   }
@@ -240,30 +258,41 @@ class DomAutomationTimeCard extends HTMLElement {
     try {
       var cfg = JSON.parse(JSON.stringify(this._autoConfig));
 
-      // Use whichever key format HA already put in the config.
-      // Mixing 'trigger' and 'triggers' in the same object causes a validation error.
-      var tk = Array.isArray(cfg.triggers)   ? 'triggers'   : 'trigger';
-      var ck = Array.isArray(cfg.conditions) ? 'conditions' : 'condition';
+      // Use whichever top-level trigger key HA stored (singular vs plural).
+      var tk = Array.isArray(cfg.triggers) ? 'triggers' : 'trigger';
       cfg[tk] = cfg[tk] || [];
-      cfg[ck] = cfg[ck] || [];
 
-      var ti = -1;
-      for (var i = 0; i < cfg[tk].length; i++) {
-        if (cfg[tk][i].platform === 'time') { ti = i; break; }
-      }
+      var ti = this._findTimeTrigger(cfg[tk]);
       var atValue = this._editTimes.length === 1 ? this._editTimes[0] : this._editTimes.slice();
-      if (ti >= 0) { cfg[tk][ti].at = atValue; }
-      else         { cfg[tk].push({ platform: 'time', at: atValue }); }
 
-      var ci = -1;
-      for (var j = 0; j < cfg[ck].length; j++) {
-        if (cfg[ck][j].condition === 'time' && cfg[ck][j].weekday !== undefined) { ci = j; break; }
+      if (ti >= 0) {
+        cfg[tk][ti].at = atValue;
+      } else {
+        cfg[tk].push({ platform: 'time', at: atValue });
+        ti = cfg[tk].length - 1;
       }
+
+      // Store weekday inside the trigger's own conditions[] — this is where the
+      // HA 2024+ automation editor reads/writes it (the "When" section).
+      var innerConds = (cfg[tk][ti].conditions || []).filter(function(c) {
+        return !(c.condition === 'time' && c.weekday !== undefined);
+      });
       if (this._editDays.length > 0) {
-        if (ci >= 0) { cfg[ck][ci].weekday = this._editDays.slice(); }
-        else         { cfg[ck].push({ condition: 'time', weekday: this._editDays.slice() }); }
-      } else if (ci >= 0) {
-        cfg[ck].splice(ci, 1);
+        innerConds.push({ condition: 'time', weekday: this._editDays.slice() });
+      }
+      if (innerConds.length > 0) {
+        cfg[tk][ti].conditions = innerConds;
+      } else {
+        delete cfg[tk][ti].conditions;
+      }
+
+      // Remove any leftover weekday entries from the global conditions array
+      // (cleanup for automations previously saved by older card versions).
+      var ck = Array.isArray(cfg.conditions) ? 'conditions' : 'condition';
+      if (cfg[ck]) {
+        cfg[ck] = cfg[ck].filter(function(c) {
+          return !(c.condition === 'time' && c.weekday !== undefined);
+        });
       }
 
       await this._apiPost('config/automation/config/' + this._autoId, cfg);
