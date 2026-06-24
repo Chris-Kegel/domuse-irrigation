@@ -8,7 +8,7 @@
  * Uses direct fetch() for all REST API calls.
  */
 
-const ATW_VERSION = '1.1.3';
+const ATW_VERSION = '1.1.4';
 
 const ATW_DAYS = [
   { key: 'mon', label: 'Mon' },
@@ -212,7 +212,8 @@ class DomAutomationTimeCard extends HTMLElement {
   }
 
   _extractTimes(cfg) {
-    var triggers = cfg.trigger || [];
+    // HA 2024+ uses 'triggers' (plural); older HA uses 'trigger'.
+    var triggers = cfg.triggers || cfg.trigger || [];
     for (var i = 0; i < triggers.length; i++) {
       if (triggers[i].platform === 'time') {
         var at = triggers[i].at;
@@ -223,7 +224,8 @@ class DomAutomationTimeCard extends HTMLElement {
   }
 
   _extractDays(cfg) {
-    var conds = cfg.condition || [];
+    // HA 2024+ uses 'conditions' (plural); older HA uses 'condition'.
+    var conds = cfg.conditions || cfg.condition || [];
     for (var i = 0; i < conds.length; i++) {
       if (conds[i].condition === 'time' && conds[i].weekday) return conds[i].weekday.slice();
     }
@@ -236,27 +238,32 @@ class DomAutomationTimeCard extends HTMLElement {
     this._renderBody();
 
     try {
-      var cfg       = JSON.parse(JSON.stringify(this._autoConfig));
-      cfg.trigger   = cfg.trigger   || [];
-      cfg.condition = cfg.condition || [];
+      var cfg = JSON.parse(JSON.stringify(this._autoConfig));
+
+      // Use whichever key format HA already put in the config.
+      // Mixing 'trigger' and 'triggers' in the same object causes a validation error.
+      var tk = Array.isArray(cfg.triggers)   ? 'triggers'   : 'trigger';
+      var ck = Array.isArray(cfg.conditions) ? 'conditions' : 'condition';
+      cfg[tk] = cfg[tk] || [];
+      cfg[ck] = cfg[ck] || [];
 
       var ti = -1;
-      for (var i = 0; i < cfg.trigger.length; i++) {
-        if (cfg.trigger[i].platform === 'time') { ti = i; break; }
+      for (var i = 0; i < cfg[tk].length; i++) {
+        if (cfg[tk][i].platform === 'time') { ti = i; break; }
       }
       var atValue = this._editTimes.length === 1 ? this._editTimes[0] : this._editTimes.slice();
-      if (ti >= 0) { cfg.trigger[ti].at = atValue; }
-      else         { cfg.trigger.push({ platform: 'time', at: atValue }); }
+      if (ti >= 0) { cfg[tk][ti].at = atValue; }
+      else         { cfg[tk].push({ platform: 'time', at: atValue }); }
 
       var ci = -1;
-      for (var j = 0; j < cfg.condition.length; j++) {
-        if (cfg.condition[j].condition === 'time' && cfg.condition[j].weekday !== undefined) { ci = j; break; }
+      for (var j = 0; j < cfg[ck].length; j++) {
+        if (cfg[ck][j].condition === 'time' && cfg[ck][j].weekday !== undefined) { ci = j; break; }
       }
       if (this._editDays.length > 0) {
-        if (ci >= 0) { cfg.condition[ci].weekday = this._editDays.slice(); }
-        else         { cfg.condition.push({ condition: 'time', weekday: this._editDays.slice() }); }
+        if (ci >= 0) { cfg[ck][ci].weekday = this._editDays.slice(); }
+        else         { cfg[ck].push({ condition: 'time', weekday: this._editDays.slice() }); }
       } else if (ci >= 0) {
-        cfg.condition.splice(ci, 1);
+        cfg[ck].splice(ci, 1);
       }
 
       await this._apiPost('config/automation/config/' + this._autoId, cfg);
