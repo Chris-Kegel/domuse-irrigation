@@ -6,5 +6,6 @@ STORAGE_VERSION = 1
 CONF_SHOW_IN_SIDEBAR = "show_in_sidebar"
 
 STATIC_PATH = "/domuse_irrigation_static"
-PANEL_URL = f"{STATIC_PATH}/domuse-irrigation-panel.js"
-CARD_URL  = f"{STATIC_PATH}/domuse-irrigation-card.js"
+PANEL_URL          = f"{STATIC_PATH}/domuse-irrigation-panel.js"
+CARD_URL           = f"{STATIC_PATH}/domuse-irrigation-card.js"
+AUTO_TIME_CARD_URL = f"{STATIC_PATH}/domuse-automation-time-card.js"

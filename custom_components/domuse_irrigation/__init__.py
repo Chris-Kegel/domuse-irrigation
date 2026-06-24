@@ -17,6 +17,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    AUTO_TIME_CARD_URL,
     CARD_URL,
     CONF_SHOW_IN_SIDEBAR,
     DOMAIN,
@@ -106,11 +107,11 @@ def _schedule_card_resource(hass: HomeAssistant) -> None:
                 items = resources.async_items()
             except AttributeError:
                 items = list(getattr(resources, "data", {}).values())
-            for item in items:
-                if item.get("url") == CARD_URL:
-                    return
-            await resources.async_create_item({"res_type": "module", "url": CARD_URL})
-            _LOGGER.info("domuse_irrigation: registered Lovelace card resource %s", CARD_URL)
+            registered = {item.get("url") for item in items}
+            for url in (CARD_URL, AUTO_TIME_CARD_URL):
+                if url not in registered:
+                    await resources.async_create_item({"res_type": "module", "url": url})
+                    _LOGGER.info("domuse_irrigation: registered Lovelace resource %s", url)
         except Exception as err:
             _LOGGER.warning("domuse_irrigation: card resource registration failed (%s)", err)
             _show_manual_resource_notification(hass)
@@ -125,11 +126,11 @@ def _show_manual_resource_notification(hass: HomeAssistant) -> None:
     pn_create(
         hass,
         (
-            "The Irrigation card could not be auto-registered as a Lovelace resource.\n\n"
-            "Add it manually:\n"
-            "**Settings -> Dashboards -> three-dot menu -> Resources -> Add Resource**\n\n"
-            f"URL: {CARD_URL}\n"
-            "Type: JavaScript module\n\n"
+            "One or more Domuse card resources could not be auto-registered.\n\n"
+            "Add them manually via **Settings → Dashboards → three-dot menu → Resources → Add Resource**:\n\n"
+            f"• `{CARD_URL}` (Irrigation Control card)\n"
+            f"• `{AUTO_TIME_CARD_URL}` (Automation Time Editor card)\n\n"
+            "Type for both: **JavaScript module**\n\n"
             "Then hard-refresh your browser (Ctrl+Shift+R)."
         ),
         title="Domuse Irrigation - Action needed",
